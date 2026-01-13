@@ -48,40 +48,40 @@ Rust-based sampler with excellent mass matrix adaptation. Use as default.
 #### Basic Usage
 
 ```python
-import nutpie
 import pymc as pm
 
 with pm.Model() as model:
     # ... model specification ...
     pass
 
-# Compile and sample
-compiled = nutpie.compile_pymc_model(model)
-idata = nutpie.sample(
-    compiled,
-    draws=1000,
-    tune=1000,
-    chains=4,
-    seed=42,
-)
+# Sample with nutpie backend
+with model:
+    idata = pm.sample(
+        draws=1000,
+        tune=1000,
+        chains=4,
+        nuts_sampler="nutpie",
+        random_seed=42,
+    )
 ```
 
 #### Configuration Options
 
 ```python
-idata = nutpie.sample(
-    compiled,
-    draws=1000,
-    tune=1000,
-    chains=4,
-    seed=42,
-    progress_bar=True,
-    target_accept=0.8,  # increase for difficult posteriors
-    cores=4,            # number of parallel chains
-)
+with model:
+    idata = pm.sample(
+        draws=1000,
+        tune=1000,
+        chains=4,
+        nuts_sampler="nutpie",
+        random_seed=42,
+        progressbar=True,
+        target_accept=0.8,  # increase for difficult posteriors
+        cores=4,            # number of parallel chains
+    )
 ```
 
-#### When to Use PyMC Instead
+#### When to Use PyMC NUTS Instead
 
 - Model uses features not yet supported by nutpie
 - Need specific PyMC sampling features (step methods, compound steps)
@@ -95,9 +95,8 @@ JAX-based sampling with GPU support and vectorized chains.
 
 ```python
 import pymc as pm
-import pymc.sampling.jax as pmjax
 
-# Optional: configure JAX
+# Optional: configure JAX for GPU
 import jax
 jax.config.update("jax_platform_name", "gpu")  # or "cpu"
 ```
@@ -111,10 +110,11 @@ with pm.Model() as model:
 
 # Sample with NumPyro NUTS
 with model:
-    idata = pmjax.sample_numpyro_nuts(
+    idata = pm.sample(
         draws=1000,
         tune=1000,
         chains=4,
+        nuts_sampler="numpyro",
         random_seed=42,
     )
 ```
@@ -124,11 +124,12 @@ with model:
 ```python
 # Run all chains in parallel on GPU
 with model:
-    idata = pmjax.sample_numpyro_nuts(
+    idata = pm.sample(
         draws=1000,
         tune=1000,
         chains=4,
-        chain_method="vectorized",  # all chains on one device
+        nuts_sampler="numpyro",
+        nuts_sampler_kwargs={"chain_method": "vectorized"},
     )
 ```
 
@@ -136,13 +137,14 @@ with model:
 
 ```python
 with model:
-    idata = pmjax.sample_numpyro_nuts(
+    idata = pm.sample(
         draws=1000,
         tune=1000,
         chains=4,
+        nuts_sampler="numpyro",
         target_accept=0.9,
-        nuts_kwargs={"max_tree_depth": 12},
-        progress_bar=True,
+        nuts_sampler_kwargs={"max_tree_depth": 12},
+        progressbar=True,
     )
 ```
 

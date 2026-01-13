@@ -275,18 +275,28 @@ period = pm.Normal("period", mu=365, sigma=10)
 
 ## Common Patterns
 
-### GP Regression with Linear Mean Function
+### GP with Parametric Mean (Linear + GP)
+
+Combine a parametric linear component with a GP for residual structure:
 
 ```python
 with pm.Model() as model:
-    # Linear mean
+    # Linear component
     alpha = pm.Normal("alpha", 0, 10)
     beta = pm.Normal("beta", 0, 1, dims="features")
-    mu = alpha + pm.math.dot(X_features, beta)
+    mu_linear = alpha + pm.math.dot(X, beta)
 
-    # GP for deviations from linear trend
-    gp = pm.gp.Marginal(cov_func=cov)
-    y_ = gp.marginal_likelihood("y", X=X_gp, y=y, sigma=sigma, mean_func=pm.gp.mean.Constant(c=mu))
+    # GP for residual nonlinear structure
+    ell = pm.InverseGamma("ell", alpha=5, beta=5)
+    eta = pm.HalfNormal("eta", sigma=2)
+    cov = eta**2 * pm.gp.cov.Matern52(1, ls=ell)
+
+    gp = pm.gp.Latent(cov_func=cov)
+    f = gp.prior("f", X=X)
+
+    # Combine linear + GP
+    sigma = pm.HalfNormal("sigma", sigma=1)
+    y_ = pm.Normal("y", mu=mu_linear + f, sigma=sigma, observed=y)
 ```
 
 ### Additive GP Components

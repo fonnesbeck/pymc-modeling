@@ -73,11 +73,12 @@ alpha = pm.Normal("alpha", mu_alpha, sigma_alpha, dims="group")
 Use nutpie as the default sampler—it's Rust-based and typically 2-5x faster:
 
 ```python
-import nutpie
-
 with model:
-    compiled = nutpie.compile_pymc_model(model)
-    idata = nutpie.sample(compiled, draws=1000, tune=1000, chains=4, seed=42)
+    idata = pm.sample(
+        draws=1000, tune=1000, chains=4,
+        nuts_sampler="nutpie",
+        random_seed=42,
+    )
 ```
 
 ### PyMC Native Sampling
@@ -100,63 +101,261 @@ For fast (but inexact) posterior approximations:
 - **ADVI/DADVI**: Variational inference with Gaussian approximation
 - **Pathfinder**: Quasi-Newton optimization for initialization or screening
 
-## Diagnostics
+## Diagnostics and ArviZ Workflow
 
-After sampling, always check:
+Follow this systematic workflow after every sampling run:
+
+### Phase 1: Immediate Checks (Required)
 
 ```python
-# Summary with convergence diagnostics
-az.summary(idata, var_names=["~offset"])  # exclude auxiliary
+# 1. Check for divergences (must be 0 or near 0)
+n_div = idata.sample_stats["diverging"].sum().item()
+print(f"Divergences: {n_div}")
 
-# Visual diagnostics
-az.plot_trace(idata, var_names=["beta", "sigma"])
-az.plot_rank(idata)  # rank plots for convergence
+# 2. Summary with convergence diagnostics
+summary = az.summary(idata, var_names=["~offset"])  # exclude auxiliary
+print(summary[["mean", "sd", "hdi_3%", "hdi_97%", "ess_bulk", "ess_tail", "r_hat"]])
 
-# Divergences
-idata.sample_stats["diverging"].sum()
+# 3. Visual convergence check
+az.plot_trace(idata, compact=True)
+az.plot_rank(idata, var_names=["beta", "sigma"])
 ```
 
-**Key thresholds:**
-- `r_hat < 1.01` (strict) or `< 1.05` (permissive)
-- `ess_bulk > 400` and `ess_tail > 400` per chain
-- No divergences (or investigate cause)
+**Pass criteria** (all must pass before proceeding):
+- Zero divergences (or < 0.1% and randomly scattered)
+- `r_hat < 1.01` for all parameters
+- `ess_bulk > 400` and `ess_tail > 400`
+- Trace plots show good mixing (overlapping densities, fuzzy caterpillar)
 
+### Phase 2: Deep Convergence (If Phase 1 marginal)
+
+```python
+# ESS evolution (should grow linearly)
+az.plot_ess(idata, kind="evolution")
+
+# Energy diagnostic (HMC health)
+az.plot_energy(idata)
+
+# Autocorrelation (should decay rapidly)
+az.plot_autocorr(idata, var_names=["beta"])
+```
+
+### Phase 3: Model Criticism (Required)
+
+```python
+# Generate posterior predictive
+with model:
+    pm.sample_posterior_predictive(idata, extend_inferencedata=True)
+
+# Does the model capture the data?
+az.plot_ppc(idata, kind="cumulative")
+
+# Calibration check
+az.plot_loo_pit(idata, y="y")
+```
+
+**Critical rule**: Never interpret parameters until Phases 1-3 pass.
+
+### Phase 4: Parameter Interpretation
+
+```python
+# Posterior summaries
+az.plot_posterior(idata, var_names=["beta"], ref_val=0)
+
+# Forest plots for hierarchical parameters
+az.plot_forest(idata, var_names=["alpha"], combined=True)
+
+# Parameter correlations (identify non-identifiability)
+az.plot_pair(idata, var_names=["alpha", "beta", "sigma"])
+```
+
+See [references/arviz.md](references/arviz.md) for comprehensive ArviZ usage.
 See [references/diagnostics.md](references/diagnostics.md) for troubleshooting.
 
 ## Prior and Posterior Predictive Checks
 
+### Prior Predictive (Before Fitting)
+
+Always check prior implications before fitting:
+
 ```python
 with model:
-    # Prior predictive (before fitting)
-    idata.extend(pm.sample_prior_predictive())
+    prior_pred = pm.sample_prior_predictive(draws=500)
 
-    # Posterior predictive (after fitting)
-    idata.extend(pm.sample_posterior_predictive(idata))
+# Do prior predictions span reasonable outcome range?
+az.plot_ppc(prior_pred, group="prior", kind="cumulative")
 
-# Visualize
-az.plot_ppc(idata, kind="cumulative")
-az.plot_ppc(idata, kind="scatter", flatten=[])
+# Numerical sanity check
+prior_y = prior_pred.prior_predictive["y"].values.flatten()
+print(f"Prior predictive range: [{prior_y.min():.1f}, {prior_y.max():.1f}]")
 ```
+
+**Warning signs**: Prior predictive covers implausible values (negative counts, probabilities > 1) or is extremely wide/narrow.
+
+### Posterior Predictive (After Fitting)
+
+```python
+with model:
+    pm.sample_posterior_predictive(idata, extend_inferencedata=True)
+
+# Density comparison
+az.plot_ppc(idata, kind="kde")
+
+# Cumulative (better for systematic deviations)
+az.plot_ppc(idata, kind="cumulative")
+
+# Calibration diagnostic
+az.plot_loo_pit(idata, y="y")
+```
+
+**Interpretation**: Observed data (dark line) should fall within posterior predictive distribution (light lines). See [references/arviz.md](references/arviz.md) for detailed interpretation.
+
+## Model Debugging
+
+### Inspecting Model Structure
+
+```python
+# Print model summary (variables, shapes, distributions)
+print(model)
+
+# Visualize model as directed graph
+pm.model_to_graphviz(model)
+```
+
+### Checking for Specification Errors
+
+Before sampling, validate the model:
+
+```python
+# Debug model: checks for common issues
+model.debug()
+
+# Check initial point log-probabilities
+# Identifies which variables have invalid starting values
+model.point_logps()
+```
+
+### Common Issues
+
+| Symptom | Likely Cause | Fix |
+|---------|--------------|-----|
+| `NaN` in log-probability | Invalid parameter combinations | Check parameter constraints, add bounds |
+| `-inf` log-probability | Parameter outside distribution support | Verify observed data matches likelihood support |
+| Very large/small logp | Scaling issues | Standardize data, use appropriate priors |
+| Slow compilation | Large model graph | Reduce Deterministics, use vectorized ops |
+
+### Debugging Divergences
+
+```python
+# Identify where divergences occur in parameter space
+az.plot_pair(idata, var_names=["alpha", "beta", "sigma"], divergences=True)
+
+# Check if divergences cluster in specific regions
+# Clustering suggests parameterization or prior issues
+```
+
+### Profiling Slow Models
+
+```python
+# Time individual operations in the log-probability computation
+profile = model.profile(model.logp())
+profile.summary()
+
+# Identify bottlenecks in gradient computation
+import pytensor
+grad_profile = model.profile(pytensor.grad(model.logp(), model.continuous_value_vars))
+grad_profile.summary()
+```
+
+See [references/gotchas.md](references/gotchas.md) for additional troubleshooting.
 
 ## Model Comparison
 
-```python
-# Compute LOO-CV (preferred)
-az.loo(idata)
-az.waic(idata)  # alternative
+### LOO-CV (Preferred)
 
-# Compare models
+```python
+# Compute LOO with pointwise diagnostics
+loo = az.loo(idata, pointwise=True)
+print(f"ELPD: {loo.elpd_loo:.1f} ± {loo.se:.1f}")
+
+# Check Pareto k values (must be < 0.7 for reliable LOO)
+print(f"Bad k (>0.7): {(loo.pareto_k > 0.7).sum().item()}")
+az.plot_khat(idata)
+```
+
+### Comparing Models
+
+```python
 comparison = az.compare({
-    "model_1": idata_1,
-    "model_2": idata_2,
+    "model_a": idata_a,
+    "model_b": idata_b,
 }, ic="loo")
 
+print(comparison[["rank", "elpd_loo", "d_loo", "weight", "dse"]])
 az.plot_compare(comparison)
 ```
 
-Check Pareto k diagnostics: `k > 0.7` indicates problematic observations.
+**Decision rule**: If `d_loo < 2*dse`, models are effectively equivalent.
 
-See [references/diagnostics.md](references/diagnostics.md) for handling high Pareto k values.
+See [references/arviz.md](references/arviz.md) for detailed model comparison workflow.
+
+## Saving and Loading Results
+
+### InferenceData Persistence
+
+Save sampling results for later analysis or sharing:
+
+```python
+# Save to NetCDF (recommended format)
+idata.to_netcdf("results/model_v1.nc")
+
+# Load
+idata = az.from_netcdf("results/model_v1.nc")
+```
+
+### Compressed Storage
+
+For large InferenceData objects (many draws, large posterior predictive):
+
+```python
+# Compress with zlib (reduces file size 50-80%)
+idata.to_netcdf(
+    "results/model_v1.nc",
+    engine="h5netcdf",
+    encoding={var: {"zlib": True, "complevel": 4}
+              for group in ["posterior", "posterior_predictive"]
+              if hasattr(idata, group)
+              for var in getattr(idata, group).data_vars}
+)
+```
+
+### What Gets Saved
+
+InferenceData preserves the full Bayesian workflow:
+- `posterior`: Parameter samples from MCMC
+- `prior`, `prior_predictive`: Prior samples (if generated)
+- `posterior_predictive`: Predictions (if generated)
+- `observed_data`, `constant_data`: Data used in fitting
+- `sample_stats`: Diagnostics (divergences, tree depth, energy)
+- `log_likelihood`: Pointwise log-likelihood (for LOO-CV)
+- All coordinates and dimensions
+
+### Workflow Pattern
+
+```python
+# Save after each major step
+with model:
+    idata = pm.sample(nuts_sampler="nutpie")
+idata.to_netcdf("results/step1_posterior.nc")
+
+with model:
+    pm.sample_posterior_predictive(idata, extend_inferencedata=True)
+idata.to_netcdf("results/step2_with_ppc.nc")
+
+# Resume later
+idata = az.from_netcdf("results/step2_with_ppc.nc")
+az.plot_ppc(idata)  # Continue analysis
+```
 
 ## Prior Selection
 
@@ -188,8 +387,13 @@ with pm.Model(coords={"group": groups, "obs": obs_idx}) as hierarchical:
 ```python
 # Logistic regression
 with pm.Model() as logistic:
-    beta = pm.Normal("beta", 0, 2.5, dims="features")  # weakly informative
-    p = pm.math.sigmoid(pm.math.dot(X, beta))
+    alpha = pm.Normal("alpha", 0, 2.5)  # intercept
+    beta = pm.Normal("beta", 0, 2.5, dims="features")
+    
+    # Logit link
+    logit_p = alpha + pm.math.dot(X, beta)
+    p = pm.math.sigmoid(logit_p)
+    
     y = pm.Bernoulli("y", p=p, observed=y_obs)
 
 # Poisson regression
@@ -263,6 +467,65 @@ See [references/bart.md](references/bart.md) for:
 - Combining BART with parametric components
 - Configuration (number of trees, depth priors)
 
+### Mixture Models
+
+```python
+import numpy as np
+
+coords = {"component": range(K)}
+
+with pm.Model(coords=coords) as gmm:
+    # Mixture weights
+    w = pm.Dirichlet("w", a=np.ones(K), dims="component")
+
+    # Component parameters (with ordering to avoid label switching)
+    mu = pm.Normal("mu", mu=0, sigma=10, dims="component",
+                   transform=pm.distributions.transforms.ordered)
+    sigma = pm.HalfNormal("sigma", sigma=2, dims="component")
+
+    # Mixture likelihood
+    y = pm.NormalMixture("y", w=w, mu=mu, sigma=sigma, observed=y_obs)
+```
+
+See [references/mixtures.md](references/mixtures.md) for:
+- Finite mixture models and mixture of regressions
+- Label switching problem and solutions (ordering constraints, relabeling)
+- Marginalized mixtures (pymc-extras)
+- Diagnostics for mixture models
+
+### Specialized Likelihoods
+
+```python
+# Zero-Inflated Poisson (excess zeros)
+with pm.Model() as zip_model:
+    psi = pm.Beta("psi", alpha=2, beta=2)  # P(structural zero)
+    mu = pm.Exponential("mu", lam=1)
+    y = pm.ZeroInflatedPoisson("y", psi=psi, mu=mu, observed=y_obs)
+
+# Censored data (e.g., right-censored survival)
+with pm.Model() as censored_model:
+    mu = pm.Normal("mu", mu=0, sigma=10)
+    sigma = pm.HalfNormal("sigma", sigma=5)
+    y = pm.Censored("y", dist=pm.Normal.dist(mu=mu, sigma=sigma),
+                    lower=None, upper=censoring_time, observed=y_obs)
+
+# Ordinal regression
+with pm.Model() as ordinal:
+    beta = pm.Normal("beta", mu=0, sigma=2, dims="features")
+    cutpoints = pm.Normal("cutpoints", mu=0, sigma=2,
+                          transform=pm.distributions.transforms.ordered,
+                          shape=n_categories - 1)
+    y = pm.OrderedLogistic("y", eta=pm.math.dot(X, beta),
+                           cutpoints=cutpoints, observed=y_obs)
+```
+
+See [references/specialized_likelihoods.md](references/specialized_likelihoods.md) for:
+- Zero-inflated models (Poisson, Negative Binomial, Binomial)
+- Hurdle models for count data
+- Censored and truncated data
+- Ordinal regression
+- Robust regression with Student-t likelihood
+
 ## Common Pitfalls
 
 See [references/gotchas.md](references/gotchas.md) for:
@@ -324,3 +587,31 @@ with pm.Model() as marginal:
 # R2D2 prior for regression
 pmx.R2D2M2CP(...)
 ```
+
+## Custom Distributions and Model Components
+
+For extending PyMC beyond built-in distributions:
+
+```python
+import pymc as pm
+import pytensor.tensor as pt
+
+# Custom likelihood via DensityDist
+def custom_logp(value, mu, sigma):
+    return pm.logp(pm.Normal.dist(mu=mu, sigma=sigma), value)
+
+with pm.Model() as model:
+    mu = pm.Normal("mu", 0, 1)
+    y = pm.DensityDist("y", mu, 1.0, logp=custom_logp, observed=y_obs)
+
+# Soft constraints via Potential
+with pm.Model() as model:
+    alpha = pm.Normal("alpha", 0, 1, dims="group")
+    pm.Potential("sum_to_zero", -100 * pt.sqr(alpha.sum()))
+```
+
+See [references/custom_models.md](references/custom_models.md) for:
+- `pm.DensityDist` for custom likelihoods
+- `pm.Potential` for soft constraints and Jacobian adjustments
+- `pm.Simulator` for simulation-based inference (ABC)
+- `pm.CustomDist` for custom prior distributions

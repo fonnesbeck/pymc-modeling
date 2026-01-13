@@ -36,7 +36,6 @@ with pm.Model(coords={"time": range(T)}) as ar1_model:
         "y",
         rho=[rho],
         sigma=sigma,
-        constant=True,
         init_dist=pm.Normal.dist(0, sigma),
         observed=y_obs,
         dims="time",
@@ -54,7 +53,6 @@ with pm.Model(coords={"time": range(T), "lag": range(p)}) as arp_model:
         "y",
         rho=rho,
         sigma=sigma,
-        constant=True,
         init_dist=pm.Normal.dist(0, sigma),
         observed=y_obs,
         dims="time",
@@ -63,19 +61,22 @@ with pm.Model(coords={"time": range(T), "lag": range(p)}) as arp_model:
 
 ### AR with Constant/Intercept
 
+To include a constant (intercept), set `constant=True` and include the intercept as the first element of `rho`.
+
 ```python
 with pm.Model() as ar_intercept:
-    # constant=True includes an intercept term
-    # The constant parameter controls the mean
-    mu = pm.Normal("mu", 0, 10)
+    # Intercept
+    c = pm.Normal("c", 0, 10)
+    # AR coefficient
     rho = pm.Uniform("rho", -1, 1)
     sigma = pm.HalfNormal("sigma", 1)
 
+    # When constant=True, the first element of rho is the intercept
     y = pm.AR(
         "y",
-        rho=[rho],
+        rho=[c, rho],
         constant=True,
-        init_dist=pm.Normal.dist(mu, sigma),
+        init_dist=pm.Normal.dist(c / (1 - rho), sigma),
         sigma=sigma,
         observed=y_obs,
     )
@@ -143,6 +144,8 @@ with pm.Model(coords={"time": range(T)}) as local_level:
 ### Local Linear Trend
 
 ```python
+import pytensor.tensor as pt
+
 with pm.Model(coords={"time": range(T)}) as local_linear:
     sigma_level = pm.HalfNormal("sigma_level", 0.1)
     sigma_slope = pm.HalfNormal("sigma_slope", 0.01)

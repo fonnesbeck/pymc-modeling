@@ -1,327 +1,269 @@
-# Diagnostics and Visualization
+# Diagnostics and Troubleshooting
+
+Quick reference for post-sampling diagnostics and common issues. For comprehensive ArviZ usage, see [arviz.md](arviz.md).
 
 ## Table of Contents
 - [Quick Diagnostic Checklist](#quick-diagnostic-checklist)
-- [Convergence Diagnostics](#convergence-diagnostics)
-- [ArviZ Plotting Reference](#arviz-plotting-reference)
+- [Convergence Thresholds](#convergence-thresholds)
 - [Divergence Troubleshooting](#divergence-troubleshooting)
-- [Model Comparison](#model-comparison)
+- [Common Problems and Fixes](#common-problems-and-fixes)
+- [Model Comparison Quick Reference](#model-comparison-quick-reference)
+
+---
 
 ## Quick Diagnostic Checklist
 
-After every sampling run:
+Run this immediately after every sampling run:
 
 ```python
 import arviz as az
 
-# 1. Check for divergences
-n_div = idata.sample_stats["diverging"].sum().item()
-print(f"Divergences: {n_div}")
+def check_sampling(idata, var_names=None):
+    """Quick post-sampling diagnostic check."""
+    # Exclude auxiliary parameters by default
+    if var_names is None:
+        var_names = ["~offset", "~raw"]
 
-# 2. Summary statistics with convergence diagnostics
-summary = az.summary(idata, var_names=["~offset"])  # exclude auxiliary params
-print(summary[["mean", "sd", "hdi_3%", "hdi_97%", "ess_bulk", "ess_tail", "r_hat"]])
+    # 1. Divergences
+    n_div = idata.sample_stats["diverging"].sum().item()
+    n_samples = idata.sample_stats["diverging"].size
+    print(f"Divergences: {n_div} ({100*n_div/n_samples:.2f}%)")
 
-# 3. Quick visual check
+    # 2. Summary with key diagnostics
+    summary = az.summary(idata, var_names=var_names)
+    display_cols = ["mean", "sd", "hdi_3%", "hdi_97%", "ess_bulk", "ess_tail", "r_hat"]
+    print(summary[[c for c in display_cols if c in summary.columns]])
+
+    # 3. Flag issues
+    if n_div > 0:
+        print(f"\n⚠️  {n_div} divergences - see 'Divergence Troubleshooting'")
+    bad_rhat = summary[summary["r_hat"] > 1.01].index.tolist()
+    if bad_rhat:
+        print(f"⚠️  High R-hat: {bad_rhat}")
+    low_ess = summary[(summary["ess_bulk"] < 400) | (summary["ess_tail"] < 400)].index.tolist()
+    if low_ess:
+        print(f"⚠️  Low ESS: {low_ess}")
+
+    return summary
+
+# Usage
+summary = check_sampling(idata)
+```
+
+### Essential Visual Checks
+
+```python
+# 1. Trace plots (mixing and stationarity)
 az.plot_trace(idata, compact=True)
+
+# 2. Rank plots (more sensitive than traces)
+az.plot_rank(idata, var_names=["beta", "sigma"])
+
+# 3. Pair plot with divergences (if any divergences)
+if idata.sample_stats["diverging"].sum() > 0:
+    az.plot_pair(idata, divergences=True)
 ```
-
-**Pass criteria**:
-- Zero divergences (or < 0.1% and investigated)
-- `r_hat < 1.01` for all parameters
-- `ess_bulk > 400` and `ess_tail > 400` (total across chains)
-- Trace plots show good mixing (caterpillar appearance)
-
-## Convergence Diagnostics
-
-### R-hat (Potential Scale Reduction Factor)
-
-Compares between-chain and within-chain variance.
-
-```python
-az.rhat(idata)
-
-# Flag problematic parameters
-rhat_df = az.summary(idata)
-problematic = rhat_df[rhat_df["r_hat"] > 1.01]
-```
-
-**Interpretation**:
-- `r_hat = 1.0`: Perfect convergence
-- `r_hat < 1.01`: Good (strict threshold)
-- `r_hat < 1.05`: Acceptable (permissive)
-- `r_hat > 1.1`: Not converged
-
-### Effective Sample Size (ESS)
-
-Accounts for autocorrelation in MCMC samples.
-
-```python
-az.ess(idata, method="bulk")  # center of distribution
-az.ess(idata, method="tail")  # extremes, important for credible intervals
-```
-
-**Interpretation**:
-- `ess > 400`: adequate for most purposes
-- `ess > 1000`: publication-quality
-- `ess < 100`: unreliable
-
-### Monte Carlo Standard Error (MCSE)
-
-```python
-az.mcse(idata)
-```
-
-MCSE should be < 5% of posterior SD.
 
 ---
 
-## ArviZ Plotting Reference
+## Convergence Thresholds
 
-### Posterior Visualization
+| Diagnostic | ✅ Good | ⚠️ Acceptable | ❌ Investigate |
+|------------|---------|---------------|----------------|
+| R-hat | < 1.01 | < 1.05 | > 1.05 |
+| ESS bulk | > 400 | > 100 | < 100 |
+| ESS tail | > 400 | > 100 | < 100 |
+| Divergences | 0 | < 0.1% (random) | > 0.1% or clustered |
+| MCSE/SD | < 5% | < 10% | > 10% |
 
-#### plot_posterior
-**Use case**: Summarize marginal posteriors with point estimates and credible intervals.
+### What Each Diagnostic Tells You
+
+**R-hat (Potential Scale Reduction Factor)**
+- Compares between-chain and within-chain variance
+- R-hat ≈ 1.0 means chains have converged to same distribution
+- High R-hat = chains disagree, don't trust results
+
+**ESS (Effective Sample Size)**
+- Accounts for autocorrelation in MCMC samples
+- ESS_bulk: accuracy for posterior mean/median
+- ESS_tail: accuracy for credible intervals (often lower)
+- Low ESS = estimates unreliable, need more samples or better mixing
+
+**Divergences**
+- HMC/NUTS diagnostic for numerical issues
+- Occur when sampler encounters difficult geometry
+- Even a few divergences can indicate biased results
+
+---
+
+## Divergence Troubleshooting
+
+### Step 1: Locate Divergent Regions
 
 ```python
-# Basic posterior summary
-az.plot_posterior(idata, var_names=["beta", "sigma"])
-
-# With reference value (e.g., null hypothesis)
-az.plot_posterior(idata, var_names=["beta"], ref_val=0)
-
-# Show specific credible interval
-az.plot_posterior(idata, hdi_prob=0.9)
-
-# Combine with rope (region of practical equivalence)
-az.plot_posterior(idata, var_names=["beta"], rope=[-0.1, 0.1])
+# Where do divergences occur in parameter space?
+az.plot_pair(
+    idata,
+    var_names=["alpha", "beta", "sigma"],  # adjust to your params
+    divergences=True,
+    divergences_kwargs={"color": "red", "alpha": 0.8}
+)
 ```
 
-#### plot_forest
-**Use case**: Compare parameters across groups or models; ideal for hierarchical models.
+Look for: Divergences clustered in specific regions (often near boundaries or in funnels).
+
+### Step 2: Identify the Cause
+
+| Pattern | Likely Cause | Fix |
+|---------|--------------|-----|
+| Funnel at low σ | Centered hierarchical | Non-centered parameterization |
+| Boundary clustering | Weak/flat prior on scale | Informative prior (HalfNormal) |
+| Scattered randomly | Step size too large | Increase target_accept |
+| Near constraint | Hard boundary | Reparameterize or soften |
+
+### Step 3: Apply Fixes
+
+**Fix 1: Non-centered parameterization** (most common fix)
 
 ```python
-# Compare group-level parameters
-az.plot_forest(idata, var_names=["alpha"], combined=True)
+# BEFORE: Centered (causes funnel)
+alpha = pm.Normal("alpha", mu_alpha, sigma_alpha, dims="group")
 
-# Multiple models side by side
-az.plot_forest([idata_1, idata_2], model_names=["Model 1", "Model 2"])
-
-# With R-hat coloring to spot convergence issues
-az.plot_forest(idata, var_names=["alpha"], r_hat=True)
-
-# ESS displayed
-az.plot_forest(idata, var_names=["alpha"], ess=True)
+# AFTER: Non-centered
+alpha_offset = pm.Normal("alpha_offset", 0, 1, dims="group")
+alpha = pm.Deterministic("alpha", mu_alpha + sigma_alpha * alpha_offset, dims="group")
 ```
 
-#### plot_ridge
-**Use case**: Visualize distributions for many parameters compactly.
+**Fix 2: Better priors on scale parameters**
 
 ```python
-# Ridge plot for group effects
-az.plot_ridge(idata, var_names=["alpha"])
+# BEFORE: Problematic
+sigma = pm.HalfCauchy("sigma", beta=10)  # too diffuse
+sigma = pm.Uniform("sigma", 0, 100)      # flat prior
 
-# Combined chains
-az.plot_ridge(idata, var_names=["beta"], combined=True)
+# AFTER: Weakly informative
+sigma = pm.HalfNormal("sigma", sigma=1)
+sigma = pm.Exponential("sigma", lam=1)
 ```
 
-#### plot_violin
-**Use case**: Compare distributions with quartile information.
+**Fix 3: Increase target acceptance**
 
 ```python
-az.plot_violin(idata, var_names=["alpha"])
+# More careful sampling (slower but fewer divergences)
+idata = pm.sample(target_accept=0.95)  # default is 0.8
+
+# For nutpie
+idata = nutpie.sample(compiled, target_accept=0.95)
 ```
 
-### Convergence Diagnostics Plots
-
-#### plot_trace
-**Use case**: Visual check for mixing and stationarity. First plot after sampling.
+**Fix 4: Increase adaptation** (rare)
 
 ```python
-# Basic trace plot (density + trace)
-az.plot_trace(idata, var_names=["beta", "sigma"])
-
-# Compact for many parameters
-az.plot_trace(idata, compact=True, combined=True)
-
-# Rank-normalized (more sensitive to convergence issues)
-az.plot_trace(idata, kind="rank_bars")
-az.plot_trace(idata, kind="rank_vlines")
+idata = pm.sample(tune=2000)  # default is 1000
 ```
 
-**Look for**:
-- Fuzzy caterpillar (good mixing)
-- No trends (stationarity)
-- Overlapping densities across chains
+### When Divergences Persist
 
-#### plot_rank
-**Use case**: More sensitive than trace plots for detecting non-convergence.
+If divergences persist after trying above fixes:
+1. Check model specification for errors
+2. Simplify model to isolate problem
+3. Consider if model is appropriate for data
+4. Use `az.plot_energy(idata)` to diagnose sampler health
 
+---
+
+## Common Problems and Fixes
+
+### Problem: High R-hat
+
+**Symptoms**: R-hat > 1.01 for some parameters
+
+**Diagnostic**:
 ```python
-az.plot_rank(idata, var_names=["beta"])
+summary = az.summary(idata)
+print(summary[summary["r_hat"] > 1.01])
+
+az.plot_trace(idata, var_names=["problem_param"], compact=False)
 ```
 
-**Look for**: Uniform distribution of ranks. Deviations indicate convergence problems.
+**Causes and fixes**:
+1. **Insufficient warmup**: Increase `tune` (e.g., tune=2000)
+2. **Multimodality**: Check for multiple modes in trace plot
+3. **Label switching**: Add ordering constraint for mixtures
+4. **Slow mixing**: Reparameterize or increase samples
 
-#### plot_ess
-**Use case**: Visualize how ESS accumulates; identify if more samples needed.
+### Problem: Low ESS
 
+**Symptoms**: ESS < 400 (especially ESS_tail)
+
+**Diagnostic**:
 ```python
-# ESS evolution over iterations
 az.plot_ess(idata, var_names=["beta"], kind="evolution")
-
-# Local ESS (identifies problematic regions)
-az.plot_ess(idata, var_names=["beta"], kind="local")
-
-# Quantile ESS
-az.plot_ess(idata, var_names=["beta"], kind="quantile")
-```
-
-#### plot_mcse
-**Use case**: Visualize Monte Carlo error across the distribution.
-
-```python
-# MCSE for different quantiles
-az.plot_mcse(idata, var_names=["beta"])
-
-# Local MCSE
-az.plot_mcse(idata, var_names=["beta"], kind="local")
-```
-
-#### plot_autocorr
-**Use case**: Identify slow mixing; high autocorrelation means low ESS.
-
-```python
 az.plot_autocorr(idata, var_names=["beta"])
 ```
 
-**Look for**: Rapid decay to zero. Slow decay indicates poor mixing.
+**Causes and fixes**:
+1. **High autocorrelation**: Reparameterize, improve sampler settings
+2. **Not enough samples**: Increase `draws`
+3. **Difficult posterior**: Increase `target_accept`, use non-centered
 
-#### plot_energy
-**Use case**: Diagnose HMC/NUTS-specific issues.
+### Problem: Poor Posterior Predictive Fit
 
+**Symptoms**: Observed data outside posterior predictive distribution
+
+**Diagnostic**:
 ```python
-az.plot_energy(idata)
-```
-
-**Look for**: Overlapping marginal and transition energy distributions. Large gaps indicate poor exploration.
-
-### Parameter Relationships
-
-#### plot_pair
-**Use case**: Identify correlations, multimodality, and divergence patterns.
-
-```python
-# Basic pair plot
-az.plot_pair(idata, var_names=["alpha", "beta", "sigma"])
-
-# With divergences highlighted (critical for debugging)
-az.plot_pair(idata, var_names=["alpha", "sigma"], divergences=True)
-
-# KDE instead of scatter
-az.plot_pair(idata, var_names=["alpha", "beta"], kind="kde")
-
-# Hexbin for large samples
-az.plot_pair(idata, var_names=["alpha", "beta"], kind="hexbin")
-
-# With marginals
-az.plot_pair(idata, var_names=["alpha", "beta"], marginals=True)
-
-# Reference point (e.g., true values in simulation)
-az.plot_pair(idata, var_names=["alpha", "beta"], reference_values={"alpha": 1.0, "beta": 0.5})
-```
-
-#### plot_parallel
-**Use case**: Visualize high-dimensional parameter space; spot divergences.
-
-```python
-# Highlight divergent samples
-az.plot_parallel(idata, var_names=["alpha", "beta", "sigma"])
-```
-
-Divergent samples shown in different color—look for patterns indicating problematic regions.
-
-### Model Checking
-
-#### plot_ppc (Posterior Predictive Check)
-**Use case**: Does the model capture the data-generating process?
-
-```python
-# First, generate posterior predictive samples
 with model:
-    idata.extend(pm.sample_posterior_predictive(idata))
+    pm.sample_posterior_predictive(idata, extend_inferencedata=True)
 
-# Density overlay (default)
-az.plot_ppc(idata)
-
-# Cumulative distribution (better for detecting systematic misfit)
 az.plot_ppc(idata, kind="cumulative")
-
-# Scatter plot (observed vs predicted)
-az.plot_ppc(idata, kind="scatter")
-
-# For specific observed variable
-az.plot_ppc(idata, var_names=["y"])
-
-# Subsample for speed with large datasets
-az.plot_ppc(idata, num_pp_samples=100)
-```
-
-**Look for**: Observed data (dark line) within posterior predictive distribution (light lines).
-
-#### plot_ppc with groups
-**Use case**: Check model fit across subgroups.
-
-```python
-# Grouped PPC (requires coords)
-az.plot_ppc(idata, kind="cumulative", flatten=[])  # separate by observation
-```
-
-#### plot_loo_pit
-**Use case**: Calibration check using LOO probability integral transform.
-
-```python
 az.plot_loo_pit(idata, y="y")
 ```
 
-**Look for**: Uniform distribution. U-shape indicates underdispersion; inverse-U indicates overdispersion.
+**Causes and fixes**:
+1. **Missing predictor**: Add relevant covariates
+2. **Wrong likelihood**: Try different distribution family
+3. **Missing structure**: Add hierarchical levels, random effects
+4. **Outliers**: Use robust likelihood (StudentT instead of Normal)
 
-#### plot_bpv (Bayesian p-values)
-**Use case**: Quantile-based model check.
+### Problem: High Pareto k Values
 
+**Symptoms**: `pareto_k > 0.7` for many observations in LOO
+
+**Diagnostic**:
 ```python
-az.plot_bpv(idata, kind="p_value")
-az.plot_bpv(idata, kind="t_stat")  # test statistic version
+loo = az.loo(idata, pointwise=True)
+az.plot_khat(idata)
+
+# Which observations are problematic?
+import numpy as np
+bad_idx = np.where(loo.pareto_k.values > 0.7)[0]
+print(f"Problematic observations: {bad_idx}")
 ```
 
-**Look for**: Values near 0.5 indicate good calibration. Extreme values (near 0 or 1) indicate misfit.
+**Causes and fixes**:
+1. **Influential outliers**: Investigate those data points
+2. **Model misspecification**: Improve model for those observations
+3. **Use K-fold CV**: When LOO approximation fails
+4. **Moment matching**: Can improve LOO estimates (advanced)
 
-### Prior Analysis
+---
 
-#### plot_prior_predictive
-**Use case**: Check if priors produce plausible predictions before fitting.
+## Model Comparison Quick Reference
 
-```python
-with model:
-    prior_pred = pm.sample_prior_predictive()
-
-# Prior predictive check
-az.plot_ppc(prior_pred, group="prior")
-```
-
-#### plot_dist
-**Use case**: Visualize prior distributions.
+### LOO-CV (Preferred)
 
 ```python
-# Compare prior and posterior
-az.plot_dist(idata.prior["beta"].values.flatten(), label="Prior")
-az.plot_dist(idata.posterior["beta"].values.flatten(), label="Posterior")
+# Single model
+loo = az.loo(idata, pointwise=True)
+print(f"ELPD: {loo.elpd_loo:.1f} ± {loo.se:.1f}")
+print(f"p_loo: {loo.p_loo:.1f}")
+
+# Check Pareto k
+print(f"Bad k (>0.7): {(loo.pareto_k > 0.7).sum().item()}")
 ```
 
-### Model Comparison Plots
-
-#### plot_compare
-**Use case**: Visualize model comparison results.
+### Model Comparison
 
 ```python
 comparison = az.compare({
@@ -330,109 +272,34 @@ comparison = az.compare({
     "model_c": idata_c,
 }, ic="loo")
 
+# Key columns
+print(comparison[["rank", "elpd_loo", "p_loo", "d_loo", "weight", "dse"]])
+
+# Visual comparison
 az.plot_compare(comparison)
 ```
 
-Shows ELPD differences with standard errors. Models are ranked; overlapping error bars suggest similar predictive performance.
-
-#### plot_elpd
-**Use case**: Pointwise ELPD differences between models.
-
-```python
-az.plot_elpd({"model_a": idata_a, "model_b": idata_b})
-```
-
-Identifies which observations drive model differences.
-
-#### plot_khat (Pareto k diagnostics)
-**Use case**: Identify problematic observations for LOO-CV.
-
-```python
-az.plot_khat(idata)
-```
-
-**Look for**: Most points below 0.7. Points above indicate influential observations where LOO approximation is unreliable.
-
----
-
-## Divergence Troubleshooting
-
-### Identifying Divergent Regions
-
-```python
-# Pair plot with divergences
-az.plot_pair(idata, var_names=["alpha", "sigma"], divergences=True)
-
-# Parallel coordinates
-az.plot_parallel(idata, var_names=["alpha", "beta", "sigma"])
-```
-
-### Common Causes and Fixes
-
-**1. Centered parameterization in hierarchical models**
-
-```python
-# BAD: Centered (causes funnel)
-alpha = pm.Normal("alpha", mu_alpha, sigma_alpha, dims="group")
-
-# GOOD: Non-centered
-alpha_offset = pm.Normal("alpha_offset", 0, 1, dims="group")
-alpha = pm.Deterministic("alpha", mu_alpha + sigma_alpha * alpha_offset, dims="group")
-```
-
-**2. Weak priors on scale parameters**
-
-```python
-# BAD
-sigma = pm.HalfCauchy("sigma", beta=10)
-
-# BETTER
-sigma = pm.HalfNormal("sigma", sigma=1)
-```
-
-**3. Increase target acceptance**
-
-```python
-idata = pm.sample(target_accept=0.95)
-```
-
----
-
-## Model Comparison
-
-### LOO-CV
-
-```python
-loo_result = az.loo(idata, pointwise=True)
-print(loo_result)
-
-# Pareto k diagnostics
-print(f"Good k (< 0.5): {(loo_result.pareto_k < 0.5).sum()}")
-print(f"OK k (0.5-0.7): {((loo_result.pareto_k >= 0.5) & (loo_result.pareto_k < 0.7)).sum()}")
-print(f"Bad k (> 0.7): {(loo_result.pareto_k > 0.7).sum()}")
-```
-
-### WAIC
-
-```python
-waic_result = az.waic(idata)
-```
-
-### Comparing Models
-
-```python
-comparison = az.compare({
-    "model_a": idata_a,
-    "model_b": idata_b,
-}, ic="loo")
-
-print(comparison[["rank", "elpd_loo", "p_loo", "d_loo", "weight", "se", "dse"]])
-```
-
-**Key columns**:
-- `elpd_loo`: Expected log pointwise predictive density (higher is better)
+**Interpretation**:
+- `elpd_loo`: Higher is better (log predictive density)
 - `d_loo`: Difference from best model
 - `dse`: Standard error of difference
-- `weight`: Stacking weight for model averaging
+- **Rule**: If `d_loo < 2*dse`, models are effectively equivalent
 
-**Decision rule**: If `d_loo` < 2×`dse`, models are effectively indistinguishable.
+### When to Use WAIC vs LOO
+
+- **LOO (default)**: More robust, handles outliers better
+- **WAIC**: Faster for large datasets, but less robust
+
+```python
+# WAIC alternative
+waic = az.waic(idata)
+```
+
+---
+
+## See Also
+
+- [arviz.md](arviz.md) - Comprehensive ArviZ usage guide
+- [gotchas.md](gotchas.md) - Common modeling pitfalls
+- [inference.md](inference.md) - Sampler selection and configuration
+- [priors.md](priors.md) - Prior selection guide
